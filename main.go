@@ -5,7 +5,10 @@ import (
 	"log"
 	"os"
 	"net"
+	"strconv"
+	"sync"
 	"time"
+	"path/filepath"
 )
 
 func main() {
@@ -50,13 +53,28 @@ func main() {
 
 	case "stream":
 		if len(os.Args) < 4 {
-			fmt.Println("Usage: transafe stream <server_addr> <local_dir> <remote_root>")
+			fmt.Println("Usage: transafe stream [-j N] <server_addr> <local_dir> <remote_root>")
 			os.Exit(1)
 		}
-		serverAddr := os.Args[2]
-		localDir := os.Args[3]
-		remoteRoot := os.Args[4]
-		if err := runStream(serverAddr, localDir, remoteRoot); err != nil {
+		// 解析 -j 参数
+		jobs := 4 // 默认并行数
+		args := os.Args[2:]
+		addrIdx := 0
+		if len(args) >= 2 && args[0] == "-j" {
+			n, err := strconv.Atoi(args[1])
+			if err == nil && n > 0 {
+				jobs = n
+			}
+			addrIdx = 2
+		}
+		if len(args) < addrIdx+3 {
+			fmt.Println("Usage: transafe stream [-j N] <server_addr> <local_dir> <remote_root>")
+			os.Exit(1)
+		}
+		serverAddr := args[addrIdx]
+		localDir := args[addrIdx+1]
+		remoteRoot := args[addrIdx+2]
+		if err := runStreamParallel(serverAddr, localDir, remoteRoot, jobs); err != nil {
 			log.Fatalf("Stream error: %v", err)
 		}
 
@@ -94,7 +112,7 @@ func handleConnection(conn net.Conn) {
 		log.Printf("Recv auth error: %v", err)
 		return
 	}
-	if pkt.Cmd != CmdAuth || string(pkt.Data) != "secret123" {
+	if pkt.Cmd != CmdAuth || string(pkt.Data) != getPassword() {
 		SendPacket(conn, CmdError, []byte("auth failed"))
 		return
 	}
@@ -119,7 +137,6 @@ func handleConnection(conn net.Conn) {
 				SendPacket(conn, CmdError, []byte(err.Error()))
 			}
 		case CmdStreamStart:
-			// 将已收到的开始包数据传递给 ReceiveStream
 			if err := ReceiveStream(conn, pkt.Data); err != nil {
 				log.Printf("Receive stream error: %v", err)
 				SendPacket(conn, CmdError, []byte(err.Error()))
@@ -140,7 +157,7 @@ func runClient(serverAddr, localFile, remoteFile string) error {
 	}
 	defer conn.Close()
 
-	if err := Auth(conn, "secret123"); err != nil {
+	if err := Auth(conn, getPassword()); err != nil {
 		return err
 	}
 	log.Println("Authenticated")
@@ -160,7 +177,7 @@ func runSendDir(serverAddr, localDir, remoteRoot string) error {
 	}
 	defer conn.Close()
 
-	if err := Auth(conn, "secret123"); err != nil {
+	if err := Auth(conn, getPassword()); err != nil {
 		return err
 	}
 	log.Println("Authenticated")
@@ -172,21 +189,139 @@ func runSendDir(serverAddr, localDir, remoteRoot string) error {
 	return nil
 }
 
-func runStream(serverAddr, localDir, remoteRoot string) error {
-	conn, err := Dial(serverAddr, 5*time.Second)
+// runStreamParallel 并行流式发送目录
+func runStreamParallel(serverAddr, localDir, remoteRoot string, jobs int) error {
+	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve local dir: %w", err)
 	}
-	defer conn.Close()
 
-	if err := Auth(conn, "secret123"); err != nil {
-		return err
-	}
-	log.Println("Authenticated")
+	// 扫描目录获取文件列表
+	var entries []fileEntry
+	var totalFiles int
+	var totalBytes int64
 
-	if err := SendStream(conn, localDir, remoteRoot, nil); err != nil {
-		return err
+	err = filepath.Walk(absLocalDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			log.Printf("Warning: skip %s: %v", path, err)
+			return nil
+		}
+		relPath, _ := filepath.Rel(absLocalDir, path)
+		remotePath := filepath.ToSlash(filepath.Join(remoteRoot, relPath))
+		entries = append(entries, fileEntry{
+			localPath:  path,
+			remotePath: remotePath,
+			isDir:      info.IsDir(),
+			size:       info.Size(),
+		})
+		if !info.IsDir() {
+			totalFiles++
+			totalBytes += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk dir: %w", err)
 	}
-	log.Printf("Stream sent: %s -> %s", localDir, remoteRoot)
+
+	// 提取文件列表（不含目录）
+	var fileEntries []fileEntry
+	for _, e := range entries {
+		if !e.isDir {
+			fileEntries = append(fileEntries, e)
+		}
+	}
+	if len(fileEntries) == 0 {
+		return fmt.Errorf("no files to transfer")
+	}
+
+	// 创建进度跟踪
+	progress := NewProgress(totalFiles, totalBytes, jobs)
+
+	// 将文件列表分片
+	chunks := chunkSlice(fileEntries, jobs)
+
+	// 启动 worker
+	var wg sync.WaitGroup
+	errChan := make(chan error, jobs)
+
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(workerID int, files []fileEntry) {
+			defer wg.Done()
+			// 每个 worker 建立独立连接
+			conn, err := Dial(serverAddr, 5*time.Second)
+			if err != nil {
+				errChan <- fmt.Errorf("worker %d dial: %w", workerID, err)
+				return
+			}
+			defer conn.Close()
+
+			if err := Auth(conn, getPassword()); err != nil {
+				errChan <- fmt.Errorf("worker %d auth: %w", workerID, err)
+				return
+			}
+
+			// 使用 SendFileListStream 发送该 worker 的文件列表
+			err = SendFileListStream(conn, files, remoteRoot, nil, func(doneFiles int, doneBytes int64) {
+				progress.Add(doneFiles, doneBytes)
+			})
+			if err != nil {
+				errChan <- fmt.Errorf("worker %d stream: %w", workerID, err)
+			}
+		}(i, chunk)
+	}
+
+	// 启动进度显示协程
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				progress.Print()
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errChan)
+	close(done)
+	progress.Done()
+
+	// 检查错误
+	for err := range errChan {
+		if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// chunkSlice 将切片分成 n 份
+func chunkSlice[T any](slice []T, n int) [][]T {
+	if n <= 0 {
+		n = 1
+	}
+	chunks := make([][]T, 0, n)
+	chunkSize := (len(slice) + n - 1) / n
+	for i := 0; i < len(slice); i += chunkSize {
+		end := i + chunkSize
+		if end > len(slice) {
+			end = len(slice)
+		}
+		chunks = append(chunks, slice[i:end])
+	}
+	return chunks
+}
+
+// getPassword 获取密码（从环境变量或默认值）
+func getPassword() string {
+	if pwd := os.Getenv("TRANSAFE_PASSWORD"); pwd != "" {
+		return pwd
+	}
+	return "secret123"
 }

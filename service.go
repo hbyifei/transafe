@@ -14,6 +14,14 @@ import (
 
 const DefaultChunkSize = 16 * 1024 * 1024
 
+// fileEntry 文件条目，用于并行传输
+type fileEntry struct {
+	localPath  string
+	remotePath string
+	isDir      bool
+	size       int64
+}
+
 type TransferOptions struct {
 	ChunkSize int
 	Resume    bool
@@ -332,12 +340,6 @@ func SendStream(conn net.Conn, localDir, remoteRoot string, opts *TransferOption
 		return fmt.Errorf("resolve local dir: %w", err)
 	}
 
-	type fileEntry struct {
-		localPath  string
-		remotePath string
-		isDir      bool
-		size       int64
-	}
 	var entries []fileEntry
 	var totalFiles int
 	var totalSize int64
@@ -564,6 +566,89 @@ func ReceiveStream(conn net.Conn, startData []byte) error {
 			log.Printf("Unexpected command during stream: %d", pkt.Cmd)
 		}
 	}
+}
+
+// ---------- Phase 3: 文件列表流式发送（用于并行传输） ----------
+
+// SendFileListStream 发送给定文件列表，带进度回调
+func SendFileListStream(conn net.Conn, files []fileEntry, remoteRoot string, opts *TransferOptions, progressFn func(doneFiles int, doneBytes int64)) error {
+	totalFiles := len(files)
+	var totalSize int64
+	for _, f := range files {
+		totalSize += f.size
+	}
+
+	// 1. 发送流开始包
+	rootBytes := []byte(remoteRoot)
+	startData := make([]byte, 4+len(rootBytes)+4+8)
+	binary.BigEndian.PutUint32(startData[:4], uint32(len(rootBytes)))
+	copy(startData[4:], rootBytes)
+	binary.BigEndian.PutUint32(startData[4+len(rootBytes):], uint32(totalFiles))
+	binary.BigEndian.PutUint64(startData[4+len(rootBytes)+4:], uint64(totalSize))
+
+	if err := SendPacket(conn, CmdStreamStart, startData); err != nil {
+		return fmt.Errorf("send stream start: %w", err)
+	}
+
+	// 2. 逐个发送文件
+	chunkSize := DefaultChunkSize
+	if opts != nil && opts.ChunkSize > 0 {
+		chunkSize = opts.ChunkSize
+	}
+	buf := make([]byte, chunkSize)
+
+	for _, entry := range files {
+		// 文件头
+		headerData := make([]byte, 4+len(entry.remotePath)+8)
+		binary.BigEndian.PutUint32(headerData[:4], uint32(len(entry.remotePath)))
+		copy(headerData[4:], []byte(entry.remotePath))
+		binary.BigEndian.PutUint64(headerData[4+len(entry.remotePath):], uint64(entry.size))
+		if err := SendPacket(conn, CmdStreamFileHeader, headerData); err != nil {
+			return fmt.Errorf("send file header: %w", err)
+		}
+
+		// 文件数据
+		f, err := os.Open(entry.localPath)
+		if err != nil {
+			return fmt.Errorf("open file %s: %w", entry.localPath, err)
+		}
+		for {
+			n, err := f.Read(buf)
+			if n > 0 {
+				if err := SendPacket(conn, CmdStreamData, buf[:n]); err != nil {
+					f.Close()
+					return fmt.Errorf("send stream data: %w", err)
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				f.Close()
+				return fmt.Errorf("read file %s: %w", entry.localPath, err)
+			}
+		}
+		f.Close()
+
+		if progressFn != nil {
+			progressFn(1, entry.size)
+		}
+	}
+
+	// 3. 发送流结束包
+	if err := SendPacket(conn, CmdStreamEnd, nil); err != nil {
+		return fmt.Errorf("send stream end: %w", err)
+	}
+
+	// 4. 等待服务端响应
+	pkt, err := RecvPacket(conn)
+	if err != nil {
+		return fmt.Errorf("recv stream response: %w", err)
+	}
+	if pkt.Cmd == CmdError {
+		return fmt.Errorf("stream error: %s", string(pkt.Data))
+	}
+	return nil
 }
 
 // SendText 预留
