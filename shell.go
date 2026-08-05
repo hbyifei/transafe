@@ -10,8 +10,9 @@ import (
 )
 
 func RunShell() {
+	l := GetLogger()
 	fmt.Println("Transafe Interactive Shell")
-	fmt.Println("Commands: connect <addr>, auth <password>, send <local> <remote>, senddir <local_dir> <remote_root>, stream <local_dir> <remote_root>, text <msg>, help, quit")
+	fmt.Println("Commands: connect <addr>, auth <password>, send <local> <remote>, senddir <local_dir> <remote_root>, text <msg>, help, quit")
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -50,6 +51,9 @@ func RunShell() {
 				fmt.Printf("Connect error: %v\n", err)
 			} else {
 				fmt.Printf("Connected to %s\n", addr)
+				if l != nil {
+					l.Info("Shell connected to %s", addr)
+				}
 			}
 
 		case "auth":
@@ -78,7 +82,7 @@ func RunShell() {
 			}
 			localPath := parts[1]
 			remotePath := parts[2]
-			stats, err := SendFile(conn, localPath, remotePath, nil)
+			stats, err := SendFile(conn, localPath, remotePath, &TransferOptions{Resume: true})
 			if err != nil {
 				fmt.Printf("Send error: %v\n", err)
 			} else {
@@ -96,27 +100,10 @@ func RunShell() {
 			}
 			localDir := parts[1]
 			remoteRoot := parts[2]
-			if err := SendDir(conn, localDir, remoteRoot, nil); err != nil {
-				fmt.Printf("SendDir error: %v\n", err)
+			if err := SendStream(conn, localDir, remoteRoot, &TransferOptions{Resume: true}); err != nil {
+				fmt.Printf("senddir error: %v\n", err)
 			} else {
-				fmt.Println("Directory sent.")
-			}
-
-		case "stream":
-			if conn == nil {
-				fmt.Println("Not connected.")
-				continue
-			}
-			if len(parts) < 3 {
-				fmt.Println("Usage: stream <local_dir> <remote_root>")
-				continue
-			}
-			localDir := parts[1]
-			remoteRoot := parts[2]
-			if err := SendStream(conn, localDir, remoteRoot, nil); err != nil {
-				fmt.Printf("Stream error: %v\n", err)
-			} else {
-				fmt.Println("Stream sent successfully.")
+				fmt.Println("Directory sent successfully (streaming).")
 			}
 
 		case "text":
@@ -146,9 +133,8 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  connect <addr>                Connect to server")
 	fmt.Println("  auth [password]               Authenticate")
-	fmt.Println("  send <local> <remote>         Send a single file")
-	fmt.Println("  senddir <local_dir> <remote_root>  Send directory (legacy)")
-	fmt.Println("  stream <local_dir> <remote_root>   Send directory (streaming)")
+	fmt.Println("  send <local> <remote>         Send a single file (with resume)")
+	fmt.Println("  senddir <local_dir> <remote_root>  Send directory (streaming)")
 	fmt.Println("  text <message>                Send text (reserved)")
 	fmt.Println("  help                          Show this help")
 	fmt.Println("  quit                          Exit shell")

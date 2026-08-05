@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// Dial 拨号连接到服务端
 func Dial(addr string, timeout time.Duration) (net.Conn, error) {
 	dialer := net.Dialer{Timeout: timeout}
 	conn, err := dialer.Dial("tcp", addr)
@@ -15,6 +16,7 @@ func Dial(addr string, timeout time.Duration) (net.Conn, error) {
 	return conn, nil
 }
 
+// Listen 监听指定地址
 func Listen(addr string) (net.Listener, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {

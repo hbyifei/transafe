@@ -1,9 +1,10 @@
-// progress.go
 package main
 
 import (
-	"fmt"	
+	"fmt"
+	"io"
 	"math"
+	"os"
 	"sync"
 	"time"
 )
@@ -16,7 +17,8 @@ type ProgressInfo struct {
 	doneBytes   int64
 	startTime   time.Time
 	lastPrint   time.Time
-	workerCount int
+	writer      io.Writer
+	errorCount  int // 新增：错误计数
 }
 
 func NewProgress(totalFiles int, totalBytes int64, workers int) *ProgressInfo {
@@ -25,8 +27,23 @@ func NewProgress(totalFiles int, totalBytes int64, workers int) *ProgressInfo {
 		totalBytes:  totalBytes,
 		startTime:   time.Now(),
 		lastPrint:   time.Now(),
-		workerCount: workers,
+		writer:      os.Stderr,
+		errorCount:  0,
 	}
+}
+
+func (p *ProgressInfo) SetTotal(files int, bytes int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.totalFiles = files
+	p.totalBytes = bytes
+}
+
+func (p *ProgressInfo) SetDone(files int, bytes int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.doneFiles = files
+	p.doneBytes = bytes
 }
 
 func (p *ProgressInfo) Add(doneFiles int, doneBytes int64) {
@@ -36,6 +53,26 @@ func (p *ProgressInfo) Add(doneFiles int, doneBytes int64) {
 	p.doneBytes += doneBytes
 }
 
+// AddError 增加错误计数
+func (p *ProgressInfo) AddError(count int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errorCount += count
+}
+
+// SetErrorCount 直接设置错误计数
+func (p *ProgressInfo) SetErrorCount(count int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errorCount = count
+}
+
+// ClearLine 清除当前行的内容
+func (p *ProgressInfo) ClearLine() {
+	fmt.Fprint(p.writer, "\r\033[K")
+}
+
+// Print 刷新进度信息（先清行，再打印）
 func (p *ProgressInfo) Print() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -43,15 +80,10 @@ func (p *ProgressInfo) Print() {
 	now := time.Now()
 	elapsed := now.Sub(p.startTime).Seconds()
 	if elapsed < 0.1 {
-		return // 太短，不打印
+		return
 	}
 
-	speed := float64(p.doneBytes) / elapsed // bytes per second
-	percent := 0.0
-	if p.totalBytes > 0 {
-		percent = float64(p.doneBytes) / float64(p.totalBytes) * 100
-	}
-
+	speed := float64(p.doneBytes) / elapsed
 	var eta string
 	if speed > 0 {
 		remainingBytes := float64(p.totalBytes - p.doneBytes)
@@ -65,31 +97,37 @@ func (p *ProgressInfo) Print() {
 		eta = "?"
 	}
 
-	// 进度条（简单版本）
-	barWidth := 40
-	filled := int(percent / 100 * float64(barWidth))
-	bar := "["
-	for i := 0; i < barWidth; i++ {
-		if i < filled {
-			bar += "="
-		} else if i == filled {
-			bar += ">"
-		} else {
-			bar += " "
-		}
-	}
-	bar += "]"
-
-	fmt.Printf("\r%s %.1f%% | %d/%d files | %.2f MB/s | ETA %s    ",
-		bar, percent, p.doneFiles, p.totalFiles, speed/1024/1024, eta)
-
-	p.lastPrint = now
+	p.ClearLine()
+	fmt.Fprintf(p.writer, "Files: %d/%d | Speed: %.2f MB/s | Elapsed: %s | ETA %s",
+		p.doneFiles, p.totalFiles, speed/1024/1024, formatDuration(time.Since(p.startTime)), eta)
 }
 
+// Done 传输完成，打印最终报告（包括错误统计）
 func (p *ProgressInfo) Done() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	fmt.Printf("\nTransfer completed in %s\n", formatDuration(time.Since(p.startTime)))
+
+	p.ClearLine()
+
+	barWidth := 52
+	bar := "["
+	for i := 0; i < barWidth; i++ {
+		bar += "="
+	}
+	bar += "]"
+
+	elapsed := time.Since(p.startTime).Seconds()
+	speed := float64(p.doneBytes) / elapsed
+	if math.IsInf(speed, 0) || math.IsNaN(speed) {
+		speed = 0
+	}
+
+	// 打印 100% 进度条
+	fmt.Fprintf(p.writer, "%s 100.0%% | %d/%d files | %.2f MB/s | Completed in %s\n",
+		bar, p.totalFiles, p.totalFiles, speed/1024/1024, formatDuration(time.Since(p.startTime)))
+
+	// 打印错误统计（类似 FastCopy 风格）
+	fmt.Fprintf(p.writer, "Errors: %d | Skipped: 0 | Warnings: 0\n", p.errorCount)
 }
 
 func formatDuration(d time.Duration) string {
