@@ -226,32 +226,46 @@ func ReceiveFile(conn net.Conn, data []byte) error {
 				writeProgress(received)
 			}
 		case CmdHash:
-			f.Close()
-			if err := os.Rename(partPath, savePath); err != nil {
-				return fmt.Errorf("rename .part to final: %w", err)
-			}
-			os.Remove(progressPath)
-			ff, err := os.Open(savePath)
-			if err != nil {
-				return fmt.Errorf("reopen file for hash: %w", err)
-			}
-			defer ff.Close()
-			finalHasher := sha256.New()
-			if _, err := io.Copy(finalHasher, ff); err != nil {
-				return fmt.Errorf("compute final hash: %w", err)
-			}
-			localHex := hex.EncodeToString(finalHasher.Sum(nil))
-			if string(pkt.Data) == localHex {
-				return SendPacket(conn, CmdOK, []byte(localHex))
-			}
-			return SendPacket(conn, CmdError, []byte("hash mismatch"))
+			// 在循环内收到哈希包（文件未完全接收时，可能是断点续传的早期哈希？）
+			// 但正常情况下不会发生，先忽略
+			log.Printf("Warning: unexpected CmdHash while receiving file data (received %d/%d)", received, fileSize)
 		default:
 			writeProgress(received)
 			return fmt.Errorf("unexpected command during file receive: %d", pkt.Cmd)
 		}
 	}
-	writeProgress(received)
-	return fmt.Errorf("connection closed before hash received (at %d/%d)", received, fileSize)
+
+	// ★★★ 修复点：文件数据全部接收完毕后，等待并处理哈希包 ★★★
+	pkt, err := RecvPacket(conn)
+	if err != nil {
+		writeProgress(received)
+		return fmt.Errorf("recv hash after file complete: %w", err)
+	}
+	if pkt.Cmd != CmdHash {
+		writeProgress(received)
+		return fmt.Errorf("expected CmdHash after file complete, got %d", pkt.Cmd)
+	}
+
+	// 处理哈希包
+	f.Close()
+	if err := os.Rename(partPath, savePath); err != nil {
+		return fmt.Errorf("rename .part to final: %w", err)
+	}
+	os.Remove(progressPath)
+	ff, err := os.Open(savePath)
+	if err != nil {
+		return fmt.Errorf("reopen file for hash: %w", err)
+	}
+	defer ff.Close()
+	finalHasher := sha256.New()
+	if _, err := io.Copy(finalHasher, ff); err != nil {
+		return fmt.Errorf("compute final hash: %w", err)
+	}
+	localHex := hex.EncodeToString(finalHasher.Sum(nil))
+	if string(pkt.Data) == localHex {
+		return SendPacket(conn, CmdOK, []byte(localHex))
+	}
+	return SendPacket(conn, CmdError, []byte("hash mismatch"))
 }
 
 // ---------- 断点续传：查询/响应偏移量 ----------

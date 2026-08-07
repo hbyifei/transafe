@@ -10,25 +10,24 @@ import (
 )
 
 type ProgressInfo struct {
-	mu          sync.Mutex
-	totalFiles  int
-	totalBytes  int64
-	doneFiles   int
-	doneBytes   int64
-	startTime   time.Time
-	lastPrint   time.Time
-	writer      io.Writer
-	errorCount  int // 新增：错误计数
+	mu         sync.Mutex
+	totalFiles int
+	totalBytes int64
+	doneFiles  int
+	doneBytes  int64
+	startTime  time.Time
+	writer     io.Writer
+	errorCount int
+	// 记录上一次打印的进度行长度，用于覆盖时补空格
+	lastLineLen int
 }
 
 func NewProgress(totalFiles int, totalBytes int64, workers int) *ProgressInfo {
 	return &ProgressInfo{
-		totalFiles:  totalFiles,
-		totalBytes:  totalBytes,
-		startTime:   time.Now(),
-		lastPrint:   time.Now(),
-		writer:      os.Stderr,
-		errorCount:  0,
+		totalFiles: totalFiles,
+		totalBytes: totalBytes,
+		startTime:  time.Now(),
+		writer:     os.Stderr,
 	}
 }
 
@@ -53,26 +52,30 @@ func (p *ProgressInfo) Add(doneFiles int, doneBytes int64) {
 	p.doneBytes += doneBytes
 }
 
-// AddError 增加错误计数
 func (p *ProgressInfo) AddError(count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.errorCount += count
 }
 
-// SetErrorCount 直接设置错误计数
 func (p *ProgressInfo) SetErrorCount(count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.errorCount = count
 }
 
-// ClearLine 清除当前行的内容
-func (p *ProgressInfo) ClearLine() {
-	fmt.Fprint(p.writer, "\r\033[K")
+// clearPrevLine 用回车回到行首，并用空格覆盖上一行内容，再回车
+func (p *ProgressInfo) clearPrevLine() {
+	if p.lastLineLen > 0 {
+		fmt.Fprint(p.writer, "\r")
+		for i := 0; i < p.lastLineLen; i++ {
+			fmt.Fprint(p.writer, " ")
+		}
+		fmt.Fprint(p.writer, "\r")
+	}
 }
 
-// Print 刷新进度信息（先清行，再打印）
+// Print 刷新进度信息（原地更新一行）
 func (p *ProgressInfo) Print() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -97,24 +100,28 @@ func (p *ProgressInfo) Print() {
 		eta = "?"
 	}
 
-	p.ClearLine()
-	fmt.Fprintf(p.writer, "Files: %d/%d | Speed: %.2f MB/s | Elapsed: %s | ETA %s",
-		p.doneFiles, p.totalFiles, speed/1024/1024, formatDuration(time.Since(p.startTime)), eta)
+	line := fmt.Sprintf("Progress: %d/%d files | %.2f MB/s | Elapsed %s | ETA %s",
+		p.doneFiles, p.totalFiles, speed/1024/1024,
+		formatDuration(time.Since(p.startTime)), eta)
+
+	p.clearPrevLine()
+	fmt.Fprint(p.writer, line)
+	p.lastLineLen = len(line)
 }
 
-// Done 传输完成，打印最终报告（包括错误统计）
+// Done 传输完成，打印最终报告
 func (p *ProgressInfo) Done() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.ClearLine()
+	// 先换行，结束进度行的原地更新
+	fmt.Fprint(p.writer, "\r\n")
 
-	barWidth := 52
-	bar := "["
+	barWidth := 40
+	bar := ""
 	for i := 0; i < barWidth; i++ {
 		bar += "="
 	}
-	bar += "]"
 
 	elapsed := time.Since(p.startTime).Seconds()
 	speed := float64(p.doneBytes) / elapsed
@@ -122,12 +129,13 @@ func (p *ProgressInfo) Done() {
 		speed = 0
 	}
 
-	// 打印 100% 进度条
 	fmt.Fprintf(p.writer, "%s 100.0%% | %d/%d files | %.2f MB/s | Completed in %s\n",
-		bar, p.totalFiles, p.totalFiles, speed/1024/1024, formatDuration(time.Since(p.startTime)))
+		bar, p.totalFiles, p.totalFiles, speed/1024/1024,
+		formatDuration(time.Since(p.startTime)))
+	fmt.Fprintf(p.writer, "Errors: %d | Skipped: 0 | Warnings: 0\n",
+		p.errorCount)
 
-	// 打印错误统计（类似 FastCopy 风格）
-	fmt.Fprintf(p.writer, "Errors: %d | Skipped: 0 | Warnings: 0\n", p.errorCount)
+	p.lastLineLen = 0
 }
 
 func formatDuration(d time.Duration) string {

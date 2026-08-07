@@ -182,10 +182,23 @@ func runClient(serverAddr, localFile, remoteFile string) error {
 	}
 	log.Println("Authenticated")
 
+	startTime := time.Now()
+
 	stats, err := SendFile(conn, localFile, remoteFile, &TransferOptions{Resume: true})
 	if err != nil {
 		return err
 	}
+
+	elapsed := time.Since(startTime)
+	speed := float64(stats.Size) / elapsed.Seconds()
+
+	// ★ 修改点：明确输出 SHA-256 校验结果
+	fmt.Printf("\nFile: %s | Size: %d bytes\n", stats.FilePath, stats.Size)
+	fmt.Printf("SHA-256校验: %s ✓\n", stats.Hash)
+	fmt.Printf("Completed in %s | Speed: %.2f MB/s\n",
+		formatDuration(elapsed),
+		speed/1024/1024)
+
 	log.Printf("File sent: %s (%d bytes, hash: %s)", stats.FilePath, stats.Size, stats.Hash)
 	return nil
 }
