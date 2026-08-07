@@ -89,9 +89,9 @@ transafe verify /dest/ --manifest manifest.json
 - ✅ 目录传输（SendDir / ReceiveDir）
 - ✅ 空目录 / 空文件正确处理
 - ✅ 基础认证
-- 🚧 单连接流式引擎重构（Phase 2，开发中）
+- ✅ 单连接流式引擎重构（Phase 2，开发中）
 - 📋 性能强化：并行传输、LZ4/Zstd 压缩、零拷贝（Phase 3）
-- 📋 断点续传与状态管理（Phase 4）
+- ✅ 断点续传与状态管理（Phase 4）
 - 📋 企业级审计与合规（CSV/JSON 报告、Manifest、verify 子命令）（Phase 5）
 
 ## 路线图
@@ -99,9 +99,9 @@ transafe verify /dest/ --manifest manifest.json
 | Phase | 功能 | 状态 |
 |-------|------|------|
 | 1 | MVP 核心传输 | ✅ 已完成 |
-| 2 | 单连接流式引擎 | 🚧 开发中 |
+| 2 | 单连接流式引擎 | ✅ 已完成 |
 | 3 | 性能强化（并行/压缩/零拷贝） | 📋 规划 |
-| 4 | 断点续传与状态管理 | 📋 规划 |
+| 4 | 断点续传与状态管理 | ✅ 已完成 |
 | 5 | 企业级审计与合规 | 📋 规划 |
 | 6 | AI Agent 集成 | 📋 远期 |
 | 7 | 产品化与商业化 | 📋 远期 |
