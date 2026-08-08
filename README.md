@@ -23,7 +23,7 @@ Transafe 选择了一个补充性的定位：
 
 | 特性 | Transafe | rsync | rclone |
 |------|----------|-------|--------|
-| 设计哲学 | 单连接流式传输 | 增量差量传输 | 云存储同步 |
+| 设计哲学 | 单连接流式传输 | 增量差量传输（rsync 算法） | 云存储同步 |
 | 海量小文件 | ⚡ 流式优化（Phase 2） | 逐文件串行 | 多流并行 |
 | 大文件增量 | ❌ 规划中 | ✅ 差量传输算法 | ✅ 支持（效率中等） |
 | 传输审计 | 📋 规划中（Phase 5） | ❌ 无 | ❌ 弱 |
@@ -38,31 +38,36 @@ Transafe 选择了一个补充性的定位：
 
 从 [GitHub Releases](https://github.com/hbyifei/transafe/releases) 下载对应平台的预编译二进制，解压后即可使用。
 
+Transafe 的**服务端和客户端是同一个二进制文件**，通过子命令区分角色。配置文件为同一份 `transafe.yaml`，通过 `server:` 与 `client:` 分段隔离两端配置。
+
 ### 启动服务端（接收端）
 
 ```bash
 transafe server :9000
 ```
 
-### 发送文件
+### 发送文件（客户端 → 服务端）
 
 ```bash
-transafe send 192.168.1.100:9000 /path/to/file /dest/
+transafe client 192.168.1.100:9000 /path/to/file /dest/
 ```
 
-### 发送目录
+### 发送目录（客户端 → 服务端）
 
 ```bash
 transafe senddir 192.168.1.100:9000 ./project/ /backup/
 ```
 
-### 接收文件
+### 接收文件（服务端 → 客户端，拉取模式）
 
 ```bash
-transafe receive 192.168.1.100:9000 /dest/ -o ./received/
+# 只能使用【相对路径】，相对于服务端配置中 allow_pull 指定的根目录
+transafe receive 192.168.1.100:9000 shared/docs/report.pdf ./downloaded/
 ```
 
-### 验证传输（即将推出）
+> ⚠️ `receive` 采用**客户端拉取（Pull）模式**：客户端发起连接，服务端在连接上回传文件数据。客户端**只能指定相对路径**，且目标目录必须由服务端在 `allow_pull` 中显式授权，禁止访问白名单之外的任何文件。
+
+### 验证传输（规划中）
 
 ```bash
 transafe verify /dest/ --manifest manifest.json
@@ -80,7 +85,7 @@ transafe verify /dest/ --manifest manifest.json
 
 单连接流式传输将协议开销从 O(N) 降至 O(1)，海量小文件场景下性能显著提升。
 
-> 📌 注：Transafe 的流式引擎（Phase 2）正在开发中，当前 Phase 1 版本已实现基础传输能力。
+> 📌 Phase 2（单连接流式引擎）已完成。当前版本已具备基础传输与流式传输能力。
 
 ## 当前状态
 
@@ -89,9 +94,11 @@ transafe verify /dest/ --manifest manifest.json
 - ✅ 目录传输（SendDir / ReceiveDir）
 - ✅ 空目录 / 空文件正确处理
 - ✅ 基础认证
-- ✅ 单连接流式引擎重构（Phase 2，开发中）
-- 📋 性能强化：并行传输、LZ4/Zstd 压缩、零拷贝（Phase 3）
-- ✅ 断点续传与状态管理（Phase 4）
+- ✅ 单连接流式引擎（Phase 2）
+- ✅ 并行传输（`senddir -j N`）
+- 📋 流式传输整体 xxHash 校验（规划中，用于替代当前的 SHA-256 以提升性能）
+- ✅ 断点续传与状态管理（Phase 4，单文件 `.part` / `.progress`）
+- 📋 `receive` 子命令 + 服务端白名单鉴权（规划中）
 - 📋 企业级审计与合规（CSV/JSON 报告、Manifest、verify 子命令）（Phase 5）
 
 ## 路线图
@@ -100,7 +107,7 @@ transafe verify /dest/ --manifest manifest.json
 |-------|------|------|
 | 1 | MVP 核心传输 | ✅ 已完成 |
 | 2 | 单连接流式引擎 | ✅ 已完成 |
-| 3 | 性能强化（并行/压缩/零拷贝） | 📋 规划 |
+| 3 | 性能强化（并行 ✅ / 压缩 / 零拷贝 / xxHash 校验） | 📋 规划 |
 | 4 | 断点续传与状态管理 | ✅ 已完成 |
 | 5 | 企业级审计与合规 | 📋 规划 |
 | 6 | AI Agent 集成 | 📋 远期 |
@@ -111,9 +118,89 @@ transafe verify /dest/ --manifest manifest.json
 
 - **语言**：Go
 - **协议**：自定义二进制协议（单连接流式传输）
-- **校验**：SHA-256（默认）/ xxHash（极速模式）
+- **校验**：SHA-256（当前默认）/ xxHash（规划中，用于极速模式）
 - **压缩**：LZ4 / Zstd（规划）
-- **传输层**：TCP（MVP）/ QUIC（规划）
+- **传输层**：TCP（当前）/ QUIC（规划）
+
+## 配置文件（transafe.yaml）
+
+服务端和客户端共用同一份配置文件，通过分段隔离：
+
+```yaml
+# 服务端配置段（执行 server 命令时读取）
+server:
+  port: 9000
+  password: "secret123"
+  # receive 功能：允许客户端拉取的目录白名单（必须为绝对路径）
+  # 未配置或为空时，receive 功能完全禁用
+  allow_pull:
+    - /data/shared
+    - /data/backups
+  log_dir: "./log"
+
+# 客户端配置段（执行 client / senddir / receive 命令时读取）
+client:
+  password: "secret123"
+  default_server: "127.0.0.1:9000"
+  log_dir: "./log"
+```
+
+> 客户端机器上**只需保留 `client:` 段**（甚至可为空，通过命令行参数指定），无需也不能查看或修改服务端的 `server:` 段。配置文件不通过网络传输，仅在本机本地生效。
+
+## `receive` 功能安全设计（规划中）
+
+`receive` 采用**客户端拉取模式**，由客户端发起连接并请求文件，服务端校验通过后通过同一条连接回传数据。为保障安全，设计如下权限模型：
+
+### 核心原则：服务端白名单制
+
+- 服务端在 `transafe.yaml` 的 `server.allow_pull` 中**显式声明**允许被拉取的目录列表。
+- 客户端**只能使用相对路径**指定待拉取文件，服务端将其拼接至白名单根目录后校验。
+- **绝对路径一律拒绝**（防止客户端直接指定 `/etc/passwd` 等敏感文件）。
+- 未配置 `allow_pull` 时，`receive` 功能默认**完全禁用**。
+
+### 路径校验规则
+
+1. 拒绝任何绝对路径（以 `/` 或盘符开头的请求）。
+2. 将客户端传入的相对路径拼接至白名单根目录，做标准化处理。
+3. 校验最终路径是否仍在白名单目录内，拒绝 `..` 路径穿越（如 `../../etc/passwd`）。
+4. 不跟随指向白名单外目标的符号链接。
+
+### 示例
+
+服务端配置：
+```yaml
+server:
+  allow_pull:
+    - /data/shared
+```
+
+合法请求：
+```bash
+transafe receive 192.168.1.100:9000 shared/report.pdf ./download/
+# 服务端解析为 /data/shared/report.pdf ✅ 允许传输
+```
+
+非法请求（均被服务端拒绝）：
+```bash
+# 使用绝对路径
+transafe receive 192.168.1.100:9000 /etc/passwd ./hack/
+
+# 尝试路径穿越
+transafe receive 192.168.1.100:9000 ../../etc/passwd ./hack/
+```
+
+### 安全加固清单
+
+| 防护项 | 实现方式 |
+|--------|---------|
+| 路径白名单 | 配置文件中显式声明允许拉取的目录 |
+| 仅允许相对路径 | 客户端禁止传绝对路径，服务端二次校验 |
+| 路径穿越防护 | 标准化后前缀匹配，拒绝 `..` 逃逸 |
+| 符号链接防护 | 不跟随，或限制在白名单内 |
+| 认证 | 复用现有密码认证 |
+| 只读访问 | `receive` 模式下服务端只读取，不写入 |
+| 审计日志 | 记录请求者 IP、认证用户、拉取路径与时间 |
+| 默认拒绝 | 未配置 `allow_pull` 时 `receive` 禁用 |
 
 ## 使用示例
 
@@ -121,16 +208,19 @@ transafe verify /dest/ --manifest manifest.json
 
 ```bash
 # 发送单个文件
-transafe send 192.168.1.100:9000 ./data.db /var/backups/
+transafe client 192.168.1.100:9000 ./data.db /var/backups/
 
 # 发送整个目录
 transafe senddir 192.168.1.100:9000 ./website/ /var/www/
 
-# 接收文件
-transafe receive 192.168.1.100:9000 /var/backups/ -o ./downloaded/
+# 并行发送目录（4 个连接）
+transafe senddir -j 4 192.168.1.100:9000 ./website/ /var/www/
+
+# 接收（拉取）文件
+transafe receive 192.168.1.100:9000 shared/report.pdf ./downloaded/
 ```
 
-### 审计与验证（即将推出）
+### 审计与验证（规划中）
 
 ```bash
 # 传输时生成审计报告
@@ -145,7 +235,7 @@ transafe history --format table
 
 ## 性能目标
 
-Transafe 在 Phase 2 完成后的性能目标是：在 100 万小文件（总 2GB，单文件平均 20KB）场景下，总耗时控制在 400 秒以内。该目标值基于以下估算：流式协议将协议开销从 O(N) 降至 O(1)，并假设千兆网络带宽利用率 ≥ 80%。
+Transafe 在 Phase 2 完成后的性能目标是：在 100 万小文件（总 2GB，单文件平均 20KB）场景下，总耗时控制在 400 秒以内。该目标值基于以下估算：流式协议将协议开销从 O(N) 降至 O(1)，并假设千兆网络、SSD 环境、带宽利用率 ≥ 80%。
 
 正式 benchmark 将在 Phase 2 完成后公布，届时将提供与 rsync、rclone、tar+ssh 等同场景的实测对比数据。
 
